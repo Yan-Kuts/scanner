@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Сканер HBS наклейок</title>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 15px; background: #f8f9fa; }
+        h1 { text-align: center; }
+        video { width: 100%; max-width: 640px; border: 3px solid #007bff; border-radius: 12px; }
+        button { padding: 12px 24px; margin: 8px 4px; font-size: 17px; border: none; border-radius: 8px; cursor: pointer; }
+        .btn-primary { background: #007bff; color: white; }
+        .btn-success { background: #28a745; color: white; }
+        .btn-danger { background: #dc3545; color: white; }
+        #result, #history { margin-top: 20px; padding: 15px; background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background: #f1f1f1; }
+        .history-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; }
+        .checked { text-decoration: line-through; color: #888; }
+    </style>
+</head>
+<body>
+    <h1>📋 Сканер HBS наклейок</h1>
+    <p style="text-align:center;">Фотографуй наклейку → автоматично витягуємо заказку, купелку та тип</p>
+
+    <video id="video" autoplay playsinline></video><br>
+    <button onclick="startCamera()" class="btn-primary">📹 Увімкнути камеру</button>
+    <button onclick="capturePhoto()" id="captureBtn" class="btn-success" style="display:none;">📸 Зробити фото наклейки</button>
+
+    <div id="result"></div>
+    <div id="history">
+        <h2>Історія сканувань <button onclick="clearHistory()" class="btn-danger" style="font-size:14px;padding:5px 10px;">Очистити все</button></h2>
+        <div id="historyList"></div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const resultDiv = document.getElementById('result');
+        let stream = null;
+        let history = JSON.parse(localStorage.getItem('hbsHistory')) || [];
+
+        function startCamera() {
+            navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+                .then(s => {
+                    stream = s;
+                    video.srcObject = s;
+                    document.getElementById('captureBtn').style.display = 'inline-block';
+                })
+                .catch(err => alert('Камера не доступна: ' + err));
+        }
+
+        async function capturePhoto() {
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth || 1280;
+            canvas.height = video.videoHeight || 720;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // Підвищення контрасту для тексту
+            const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imgData.data;
+            for (let i = 0; i < data.length; i += 4) {
+                let gray = data[i] * 0.3 + data[i+1] * 0.59 + data[i+2] * 0.11;
+                gray = gray < 140 ? 0 : 255; // сильний контраст
+                data[i] = data[i+1] = data[i+2] = gray;
+            }
+            ctx.putImageData(imgData, 0, 0);
+
+            const imageUrl = canvas.toDataURL('image/jpeg', 0.95);
+
+            resultDiv.innerHTML = `<h2>Обробка...</h2><img src="${imageUrl}" style="max-width:100%;border-radius:8px;">`;
+
+            // OCR
+            const worker = await Tesseract.createWorker(['eng', 'ces'], 1, { logger: m => {} });
+            const { data: { text } } = await worker.recognize(canvas.toDataURL('image/jpeg', 0.95));
+            await worker.terminate();
+
+            // Витягуємо потрібні поля
+            const orderMatch = text.match(/72\s?0?8\s?0\s?8\s?1\s?3|72080813|72 080 813/g);
+            const cupelkaMatch = text.match(/61|\/61|61\s*$/m);
+            const typeMatch = text.match(/\b1R\b|\bR\b|Typ\s*1R/i);
+            const dateMatch = text.match(/\d{1,2}\.\s?\d{1,2}\.\s?\d{4}/);
+
+            const orderNum = orderMatch ? orderMatch[0].replace(/\s/g, '') : 'Не знайдено';
+            const cupelka = cupelkaMatch ? '61' : 'Не знайдено';
+            const typ = typeMatch ? typeMatch[0].replace(/Typ\s*/i, '') : 'Не знайдено';
+            const dateProd = dateMatch ? dateMatch[0] : 'Не знайдено';
+
+            const scanDate = new Date().toLocaleString('uk-UA');
+
+            const record = {
+                id: Date.now(),
+                order: orderNum,
+                cupelka: cupelka,
+                type: typ,
+                prodDate: dateProd,
+                scanDate: scanDate,
+                checked: false
+            };
+
+            history.unshift(record);
+            localStorage.setItem('hbsHistory', JSON.stringify(history));
+
+            showResult(record, imageUrl);
+            renderHistory();
+        }
+
+        function showResult(record, imageUrl) {
+            resultDiv.innerHTML = `
+                <h2>✅ Результат сканування</h2>
+                <img src="${imageUrl}" style="max-width:100%;border-radius:8px;margin-bottom:15px;">
+                <table>
+                    <tr><th>Номер заказки</th><td><strong>${record.order}</strong></td></tr>
+                    <tr><th>Номер купелки</th><td><strong>${record.cupelka}</strong></td></tr>
+                    <tr><th>Тип</th><td><strong>${record.type}</strong></td></tr>
+                    <tr><th>Дата виробництва</th><td>${record.prodDate}</td></tr>
+                    <tr><th>Дата сканування</th><td>${record.scanDate}</td></tr>
+                </table>
+                <button onclick="location.reload()" style="margin-top:15px;">Нове фото</button>
+            `;
+        }
+
+        function renderHistory() {
+            const list = document.getElementById('historyList');
+            list.innerHTML = '';
+            history.forEach((item, index) => {
+                const div = document.createElement('div');
+                div.className = `history-item ${item.checked ? 'checked' : ''}`;
+                div.innerHTML = `
+                    <div>
+                        <strong>${item.order}</strong> — ${item.cupelka} (${item.type})<br>
+                        <small>${item.prodDate} | Скан: ${item.scanDate}</small>
+                    </div>
+                    <div>
+                        <input type="checkbox" ${item.checked ? 'checked' : ''} onchange="toggleCheck(${index})">
+                        <button onclick="deleteRecord(${index})" class="btn-danger" style="padding:4px 8px;font-size:14px;">✕</button>
+                    </div>
+                `;
+                list.appendChild(div);
+            });
+        }
+
+        function toggleCheck(index) {
+            history[index].checked = !history[index].checked;
+            localStorage.setItem('hbsHistory', JSON.stringify(history));
+            renderHistory();
+        }
+
+        function deleteRecord(index) {
+            if (confirm('Видалити цей запис?')) {
+                history.splice(index, 1);
+                localStorage.setItem('hbsHistory', JSON.stringify(history));
+                renderHistory();
+            }
+        }
+
+        function clearHistory() {
+            if (confirm('Очистити всю історію?')) {
+                history = [];
+                localStorage.setItem('hbsHistory', JSON.stringify(history));
+                renderHistory();
+            }
+        }
+
+        // Завантаження історії при старті
+        window.onload = () => {
+            renderHistory();
+        };
+
+        window.addEventListener('beforeunload', () => {
+            if (stream) stream.getTracks().forEach(t => t.stop());
+        });
+    </script>
+</body>
+</html>
